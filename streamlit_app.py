@@ -15,7 +15,6 @@ from model_agent import (
 st.title("📚 Personalized Study Schedule Builder")
 st.sidebar.header("Inputs")
 
-@st.cache_data(show_spinner=False)
 def load_resources():
     """
     Attempt to train with PySpark; if that fails, fall back to pandas/Sklearn.
@@ -32,12 +31,14 @@ def load_resources():
         predict_fn = lambda fd: predict_subject_scores_pyspark(model, spark_pipeline, fd)
         return subject_templates, predict_fn
     except Exception as e:
-        st.warning("⚠️ PySpark pipeline failed; falling back to pandas/Scikit-learn. Error: {}".format(e))
+        st.warning(
+            f"⚠️ PySpark pipeline failed; falling back to pandas/Scikit-learn. Error: {e}"
+        )
         model, preprocessors = train_model_pandas(merged_df, features)
         predict_fn = lambda fd: predict_subject_scores_pandas(model, preprocessors, fd)
         return subject_templates, predict_fn
 
-# Load resources
+# Load resources without caching to avoid pickling issues
 subject_templates, predict_fn = load_resources()
 
 # UI inputs
@@ -46,6 +47,7 @@ subjects = st.sidebar.multiselect(
     options=list(subject_templates.keys())
 )
 
+# Collect exam dates
 exam_dates = {}
 for subj in subjects:
     exam_dates[subj] = st.sidebar.date_input(
@@ -54,6 +56,7 @@ for subj in subjects:
         key=subj
     ).strftime("%Y-%m-%d")
 
+# Daily study hours input
 daily_hours = st.sidebar.number_input(
     "Hours you can study each day:",
     min_value=1,
@@ -61,6 +64,7 @@ daily_hours = st.sidebar.number_input(
     value=4
 )
 
+# Generate schedule
 if st.sidebar.button("Generate Schedule"):
     if not subjects:
         st.warning("Please select at least one subject to schedule for.")
