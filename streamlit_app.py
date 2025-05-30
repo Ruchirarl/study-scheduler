@@ -37,7 +37,7 @@ for subj in subjects:
     ).strftime("%Y-%m-%d")
 
 # 3) Daily study hours
- daily_hours = st.sidebar.number_input(
+daily_hours = st.sidebar.number_input(
     "Hours you can study each day:",
     min_value=1, max_value=24, value=4
 )
