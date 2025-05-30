@@ -1,3 +1,8 @@
+import os, sys
+# Tell PySpark to use this Python interpreter
+os.environ["PYSPARK_PYTHON"] = sys.executable
+os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -6,11 +11,13 @@ import pandas as pd
 from pyspark.sql import SparkSession
 from pyspark.ml.feature import Imputer, VectorAssembler, StandardScaler
 from pyspark.ml import Pipeline
+from datetime import datetime
+import builtins
 
-# === PyTorch model definition ===
+# === PyTorch MLP model ===
 class MLP(nn.Module):
     def __init__(self, input_size, num_classes):
-        super(MLP, self).__init__()
+        super().__init__()
         self.fc1 = nn.Linear(input_size, 64)
         self.fc2 = nn.Linear(64, 32)
         self.out = nn.Linear(32, num_classes)
@@ -20,19 +27,16 @@ class MLP(nn.Module):
         x = F.relu(self.fc2(x))
         return self.out(x)
 
-
-# === Training helper ===
-def train_model(merged_df: pd.DataFrame, features: list, label_col: str = 'target_class',
-                epochs: int = 100, lr: float = 0.001):
+# === Training helper using PySpark ===
+def train_model(merged_df: pd.DataFrame, features: list, label_col: str = 'target_class', epochs: int = 100, lr: float = 0.001):
     """
-    Builds Spark preprocessing pipeline, trains MLP on entire dataset,
-    and returns (trained_model, fitted_spark_pipeline).
+    Builds a Spark preprocessing pipeline, trains the PyTorch MLP, and returns (model, pipeline).
+    Requires Java JDK installed and on PATH.
     """
-    # 1) Spark DataFrame
     spark = SparkSession.builder.appName("train_model").getOrCreate()
     spark_df = spark.createDataFrame(merged_df.dropna(subset=[label_col]))
 
-    # 2) Preprocessing pipeline
+    # Spark ML pipeline: impute, assemble, scale
     imputer = Imputer(inputCols=features, outputCols=features)
     assembler = VectorAssembler(inputCols=features, outputCol="features_vec")
     scaler = StandardScaler(inputCol="features_vec", outputCol="features")
@@ -40,18 +44,20 @@ def train_model(merged_df: pd.DataFrame, features: list, label_col: str = 'targe
     fitted_pipeline = pipeline.fit(spark_df)
     final_df = fitted_pipeline.transform(spark_df).select("features", label_col)
 
-    # 3) Convert to tensors
+    # Convert to torch tensors
     X = np.array(final_df.rdd.map(lambda r: r[0].toArray()).collect())
     y = np.array(final_df.rdd.map(lambda r: int(r[1])).collect())
     X_tensor = torch.tensor(X, dtype=torch.float32)
     y_tensor = torch.tensor(y, dtype=torch.long)
 
-    # 4) Model and training
+    # Model setup
     model = MLP(input_size=X_tensor.shape[1], num_classes=len(np.unique(y)))
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.CrossEntropyLoss()
 
-    for epoch in range(epochs):
+    # Training loop
+    model.train()
+    for _ in range(epochs):
         optimizer.zero_grad()
         logits = model(X_tensor)
         loss = criterion(logits, y_tensor)
@@ -60,17 +66,14 @@ def train_model(merged_df: pd.DataFrame, features: list, label_col: str = 'targe
 
     return model, fitted_pipeline
 
-
 # === Inference helper ===
-def predict_subject_scores_pytorch(model, pipeline_model, subject_feature_dict: dict):
+def predict_subject_scores_pyspark(model, pipeline_model, subject_feature_dict: dict):
     """
-    Given a trained model and Spark pipeline,
-    returns dict: subject_code -> predicted class (0/1/2).
+    Predict classes using the trained model and Spark pipeline.
     """
     spark = SparkSession.builder.getOrCreate()
     predictions = {}
     for subj_code, features in subject_feature_dict.items():
-        # Create single-row Spark DataFrame
         pdf = pd.DataFrame([features])
         sdf = spark.createDataFrame(pdf)
         transformed = pipeline_model.transform(sdf).select("features")
@@ -82,43 +85,28 @@ def predict_subject_scores_pytorch(model, pipeline_model, subject_feature_dict: 
         predictions[subj_code] = pred
     return predictions
 
-
-# === SchedulerAgent definition ===
-from datetime import datetime
-import builtins
-
+# === SchedulerAgent ===
 class SchedulerAgent:
     def __init__(self, predicted_scores: dict, exam_dates: dict, total_daily_hours: int):
-        # Ensure scores are ints
-        self.predicted_scores = {
-            subj: int(score) for subj, score in predicted_scores.items()
-        }
+        self.predicted_scores = {subj: int(score) for subj, score in predicted_scores.items()}
         self.exam_dates = exam_dates
         self.total_daily_hours = total_daily_hours
 
     def _calculate_priority_scores(self):
         max_score = max(self.predicted_scores.values(), default=2)
-        return {
-            subj: (max_score - score + 1) 
-            for subj, score in self.predicted_scores.items()
-        }
+        return {subj: (max_score - score + 1) for subj, score in self.predicted_scores.items()}
 
     def _calculate_days_until_exam(self):
         today = datetime.today().date()
-        return {
-            subj: max(1, (datetime.strptime(date, "%Y-%m-%d").date() - today).days)
-            for subj, date in self.exam_dates.items()
-        }
+        return {subj: max(1, (datetime.strptime(date, "%Y-%m-%d").date() - today).days)
+                for subj, date in self.exam_dates.items()}
 
     def _compute_total_hours(self, priority_scores, days_left):
         total_priority = builtins.sum(priority_scores.values())
         if total_priority == 0:
             return {subj: 0 for subj in priority_scores}
-        # Allocate based on priority and days left
-        return {
-            subj: round((priority_scores[subj] / total_priority) * self.total_daily_hours * days_left[subj], 2)
-            for subj in priority_scores
-        }
+        return {subj: round((priority_scores[subj] / total_priority) * self.total_daily_hours * days_left[subj], 2)
+                for subj in priority_scores}
 
     def run(self):
         priority = self._calculate_priority_scores()
