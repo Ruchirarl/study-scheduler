@@ -1,0 +1,23 @@
+# Byte-compiled / caching
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment folder
+.venv/
+venv/
+env/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# VS Code workspace settings
+.vscode/
+
+# Data files (if you prefer not to commit CSVs)
+# data/*.csv
+*.csv
+
+# Operating system files
+.DS_Store
+Thumbs.db
